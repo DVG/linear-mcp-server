@@ -86,9 +86,41 @@ npx @smithery/cli install linear-mcp-server --client claude
      - `createAsUser` (string): Custom username
      - `displayIconUrl` (string): Custom avatar URL
 
+6. **`linear_create_project`**: Create a new Linear project
+   - Required inputs:
+     - `name` (string): Project name
+     - `teamId` (string): Team ID to create project in
+   - Optional inputs:
+     - `description` (string): Project description (markdown supported)
+     - `icon` (string): Project icon (emoji)
+     - `color` (string): Project color (hex code)
+     - `state` (string): Initial project state ID
+
+7. **`linear_update_project`**: Update existing projects
+   - Required inputs:
+     - `id` (string): Project ID to update
+   - Optional inputs:
+     - `name` (string): New project name
+     - `description` (string): New project description
+     - `icon` (string): New project icon (emoji)
+     - `color` (string): New project color (hex code)
+     - `state` (string): New project state ID
+
+8. **`linear_list_projects`**: List projects with filtering
+   - Optional inputs:
+     - `teamId` (string): Filter by team ID
+     - `includeArchived` (boolean): Include archived projects
+     - `limit` (number, default: 50): Max results
+
+9. **`linear_set_project_content`**: Set rich markdown content for a project
+   - Required inputs:
+     - `id` (string): Project ID
+     - `content` (string): Rich markdown content for the project description
+
 ### Resources
 
 - `linear-issue:///{issueId}` - View individual issue details
+- `linear-project:///{projectId}` - View individual project details
 - `linear-team:///{teamId}/issues` - View team issues
 - `linear-user:///{userId}/assigned` - View user's assigned issues
 - `linear-organization:` - View organization info
@@ -107,6 +139,14 @@ Some example prompts you can use with Claude Desktop to interact with Linear:
 4. "Give me a summary of recent updates on the issues for mobile app development" → use `search_issues` to identify the relevant issue(s), then `linear-issue:///{issueId}` fetch the issue details and show recent activity and comments
 
 5. "What's the current workload for the mobile team?" → combine `linear-team:///{teamId}/issues` and `search_issues` to analyze issue distribution and priorities across the mobile team
+
+6. "Create a new project for our Q3 marketing campaign" → use `linear_create_project` to create a new project with appropriate details and team assignment
+
+7. "Update the documentation for our API project with the latest authentication flow" → use `linear_set_project_content` to update a project's rich markdown content with detailed documentation
+
+8. "Show me all active projects for the engineering team" → use `linear_list_projects` to list all projects filtered by team
+
+9. "Change the icon and color of our onboarding project to make it more visible" → use `linear_update_project` to update a project's visual attributes
 
 ## Development
 

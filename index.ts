@@ -60,6 +60,35 @@ interface AddCommentArgs {
   displayIconUrl?: string;
 }
 
+interface CreateProjectArgs {
+  name: string;
+  teamId: string;
+  description?: string;
+  icon?: string;
+  color?: string;
+  state?: string;
+}
+
+interface UpdateProjectArgs {
+  id: string;
+  name?: string;
+  description?: string;
+  icon?: string;
+  color?: string;
+  state?: string;
+}
+
+interface ListProjectsArgs {
+  teamId?: string;
+  includeArchived?: boolean;
+  limit?: number;
+}
+
+interface ProjectContentArgs {
+  id: string;
+  content: string;
+}
+
 interface RateLimiterMetrics {
   totalRequests: number;
   requestsInLastHour: number;
@@ -75,6 +104,17 @@ interface LinearIssueResponse {
   status: string | null;
   stateName?: string;
   url: string;
+}
+
+interface LinearProjectResponse {
+  id: string;
+  name: string;
+  description: string | null;
+  url: string;
+  state: string | null;
+  icon: string | null;
+  color: string | null;
+  teamName: string | null;
 }
 
 class RateLimiter {
@@ -428,6 +468,123 @@ class LinearMCPClient {
     return this.addMetricsToResponse(issuesWithDetails);
   }
 
+  async getProjects(args: ListProjectsArgs = {}) {
+    const filter: any = {};
+
+    if (args.teamId) {
+      filter.team = { id: { eq: args.teamId } };
+    }
+
+    if (args.includeArchived !== undefined) {
+      filter.archived = { eq: args.includeArchived };
+    }
+
+    const result = await this.rateLimiter.enqueue(
+      () => this.client.projects({
+        first: args.limit || 50,
+        filter
+      }),
+      'listProjects'
+    );
+
+    if (!result?.nodes) {
+      return this.addMetricsToResponse([]);
+    }
+
+    const projectsWithDetails = await this.rateLimiter.batch(
+      result.nodes,
+      5,
+      async (project) => {
+        const team = await this.rateLimiter.enqueue(() => project.team);
+        const state = await this.rateLimiter.enqueue(() => project.state);
+
+        return {
+          uri: `linear-project:///${project.id}`,
+          mimeType: "application/json",
+          name: project.name,
+          description: `Linear project: ${project.name}`,
+          metadata: {
+            id: project.id,
+            name: project.name,
+            description: project.description,
+            url: project.url,
+            state: state?.name,
+            icon: project.icon,
+            color: project.color,
+            teamName: team?.name
+          }
+        };
+      },
+      'getProjectDetails'
+    );
+
+    return this.addMetricsToResponse(projectsWithDetails);
+  }
+
+  async getProject(projectId: string) {
+    const result = await this.rateLimiter.enqueue(() => this.client.project(projectId));
+    if (!result) throw new Error(`Project ${projectId} not found`);
+
+    const team = await this.rateLimiter.enqueue(() => result.team);
+    const state = await this.rateLimiter.enqueue(() => result.state);
+
+    return this.addMetricsToResponse({
+      id: result.id,
+      name: result.name,
+      description: result.description,
+      url: result.url,
+      state: state?.name,
+      icon: result.icon,
+      color: result.color,
+      teamName: team?.name
+    });
+  }
+
+  async createProject(args: CreateProjectArgs) {
+    const projectPayload = await this.client.createProject({
+      name: args.name,
+      teamId: args.teamId,
+      description: args.description,
+      icon: args.icon,
+      color: args.color,
+      stateId: args.state
+    });
+
+    const project = await projectPayload.project;
+    if (!project) throw new Error("Failed to create project");
+    return project;
+  }
+
+  async updateProject(args: UpdateProjectArgs) {
+    const project = await this.client.project(args.id);
+    if (!project) throw new Error(`Project ${args.id} not found`);
+
+    const updatePayload = await project.update({
+      name: args.name,
+      description: args.description,
+      icon: args.icon,
+      color: args.color,
+      stateId: args.state
+    });
+
+    const updatedProject = await updatePayload.project;
+    if (!updatedProject) throw new Error("Failed to update project");
+    return updatedProject;
+  }
+
+  async setProjectContent(args: ProjectContentArgs) {
+    const project = await this.client.project(args.id);
+    if (!project) throw new Error(`Project ${args.id} not found`);
+
+    const contentPayload = await project.update({
+      description: args.content
+    });
+
+    const updatedProject = await contentPayload.project;
+    if (!updatedProject) throw new Error("Failed to update project content");
+    return updatedProject;
+  }
+
   async getViewer() {
     const viewer = await this.client.viewer;
     const [teams, organization] = await Promise.all([
@@ -616,6 +773,66 @@ const addCommentTool: Tool = {
   }
 };
 
+const createProjectTool: Tool = {
+  name: "linear_create_project",
+  description: "Creates a new Linear project with specified details. Use this to organize work in a project structure. Returns the created project's details including its URL. Required fields are name and teamId.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Project name" },
+      teamId: { type: "string", description: "Team ID" },
+      description: { type: "string", description: "Project description in markdown format" },
+      icon: { type: "string", description: "Project icon (emoji)" },
+      color: { type: "string", description: "Project color (hex code)" },
+      state: { type: "string", description: "Initial project state ID" }
+    },
+    required: ["name", "teamId"]
+  }
+};
+
+const updateProjectTool: Tool = {
+  name: "linear_update_project",
+  description: "Updates an existing Linear project's properties. Use this to modify project details like name, description, icon, color, or state. Requires the project ID and accepts any combination of updatable fields. Returns the updated project details.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      id: { type: "string", description: "Project ID" },
+      name: { type: "string", description: "New project name" },
+      description: { type: "string", description: "New project description in markdown format" },
+      icon: { type: "string", description: "New project icon (emoji)" },
+      color: { type: "string", description: "New project color (hex code)" },
+      state: { type: "string", description: "New project state ID" }
+    },
+    required: ["id"]
+  }
+};
+
+const listProjectsTool: Tool = {
+  name: "linear_list_projects",
+  description: "Lists Linear projects with optional filtering. Retrieves project details including name, description, state, team, and URLs. Useful for getting an overview of all projects or filtering by team.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      teamId: { type: "string", description: "Filter projects by team ID" },
+      includeArchived: { type: "boolean", description: "Include archived projects" },
+      limit: { type: "number", description: "Maximum number of projects to return (default: 50)" }
+    }
+  }
+};
+
+const setProjectContentTool: Tool = {
+  name: "linear_set_project_content",
+  description: "Updates the description field of a Linear project with rich markdown content. Use this to provide detailed project documentation, specifications, or any other project-related content that supports markdown formatting.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      id: { type: "string", description: "Project ID" },
+      content: { type: "string", description: "Rich markdown content for the project description" }
+    },
+    required: ["id", "content"]
+  }
+};
+
 const resourceTemplates: ResourceTemplate[] = [
   {
     uriTemplate: "linear-issue:///{issueId}",
@@ -629,6 +846,34 @@ const resourceTemplates: ResourceTemplate[] = [
     },
     examples: [
       "linear-issue:///c2b318fb-95d2-4a81-9539-f3268f34af87"
+    ]
+  },
+  {
+    uriTemplate: "linear-project:///{projectId}",
+    name: "Linear Project",
+    description: "A Linear project with its details, metadata, and rich content. Use this to fetch detailed information about a specific project.",
+    parameters: {
+      projectId: {
+        type: "string",
+        description: "The unique identifier of the Linear project (e.g., the internal ID)"
+      }
+    },
+    examples: [
+      "linear-project:///d3c429gc-06e3-5b92-0640-g4379g45bg98"
+    ]
+  },
+  {
+    uriTemplate: "linear-team:///{teamId}/issues",
+    name: "Team Issues",
+    description: "All active issues belonging to a specific Linear team, including their status, priority, and assignees.",
+    parameters: {
+      teamId: {
+        type: "string",
+        description: "The unique identifier of the Linear team (found in team settings)"
+      }
+    },
+    examples: [
+      "linear-team:///TEAM-123/issues"
     ]
   },
   {
@@ -647,20 +892,6 @@ const resourceTemplates: ResourceTemplate[] = [
     parameters: {},
     examples: [
       "linear-organization:"
-    ]
-  },
-  {
-    uriTemplate: "linear-team:///{teamId}/issues",
-    name: "Team Issues",
-    description: "All active issues belonging to a specific Linear team, including their status, priority, and assignees.",
-    parameters: {
-      teamId: {
-        type: "string",
-        description: "The unique identifier of the Linear team (found in team settings)"
-      }
-    },
-    examples: [
-      "linear-team:///TEAM-123/issues"
     ]
   },
   {
@@ -683,7 +914,7 @@ const resourceTemplates: ResourceTemplate[] = [
 const serverPrompt: Prompt = {
   name: "linear-server-prompt",
   description: "Instructions for using the Linear MCP server effectively",
-  instructions: `This server provides access to Linear, a project management tool. Use it to manage issues, track work, and coordinate with teams.
+  instructions: `This server provides access to Linear, a project management tool. Use it to manage issues, track work, coordinate with teams, and organize work in projects.
 
 Key capabilities:
 - Create and update issues: Create new tickets or modify existing ones with titles, descriptions, priorities, and team assignments.
@@ -691,6 +922,7 @@ Key capabilities:
 - Team coordination: Access team-specific issues and manage work distribution within teams.
 - Issue tracking: Add comments and track progress through status updates and assignments.
 - Organization overview: View team structures and user assignments across the organization.
+- Project management: Create, update, and organize work in projects with rich markdown content.
 
 Tool Usage:
 - linear_create_issue:
@@ -719,6 +951,27 @@ Tool Usage:
   - use displayIconUrl for bot/integration avatars
   - createAsUser for custom comment attribution
 
+- linear_create_project:
+  - requires name and teamId
+  - supports rich markdown descriptions
+  - can set icon (emoji) and color (hex code)
+  - state parameter accepts valid state IDs
+
+- linear_update_project:
+  - only include fields you want to change
+  - use to update metadata like name, description, icon, color
+  - state parameter accepts valid state IDs
+
+- linear_list_projects:
+  - filter by team to see team-specific projects
+  - includeArchived parameter shows/hides archived projects
+  - limit parameter controls number of results returned
+
+- linear_set_project_content:
+  - use to set rich markdown content for project descriptions
+  - supports full markdown formatting including headers, lists, code blocks
+  - useful for detailed project documentation
+
 Best practices:
 - When creating issues:
   - Write clear, actionable titles that describe the task well (e.g., "Implement user authentication for mobile app")
@@ -735,13 +988,22 @@ Best practices:
   - Keep content focused on the specific issue and relevant updates
   - Include action items or next steps when appropriate
 
+- When working with projects:
+  - Use descriptive names that clearly identify the project's purpose
+  - Provide detailed descriptions with markdown formatting for better readability
+  - Use icons and colors to visually distinguish different projects
+  - Organize related issues within projects for better work management
+  - Use rich markdown content for comprehensive project documentation
+
 - General best practices:
   - Fetch organization data first to get valid team IDs
   - Use search_issues to find issues for bulk operations
   - Include markdown formatting in descriptions and comments
+  - Use projects to organize related work items
 
 Resource patterns:
 - linear-issue:///{issueId} - Single issue details (e.g., linear-issue:///c2b318fb-95d2-4a81-9539-f3268f34af87)
+- linear-project:///{projectId} - Single project details (e.g., linear-project:///d3c429gc-06e3-5b92-0640-g4379g45bg98)
 - linear-team:///{teamId}/issues - Team's issue list (e.g., linear-team:///OPS/issues)
 - linear-user:///{userId}/assigned - User assignments (e.g., linear-user:///USER-123/assigned)
 - linear-organization: - Organization for the current user
@@ -801,6 +1063,35 @@ const AddCommentArgsSchema = z.object({
   displayIconUrl: z.string().optional().describe("Optional avatar URL for the comment")
 });
 
+const CreateProjectArgsSchema = z.object({
+  name: z.string().describe("Project name"),
+  teamId: z.string().describe("Team ID"),
+  description: z.string().optional().describe("Project description in markdown format"),
+  icon: z.string().optional().describe("Project icon (emoji)"),
+  color: z.string().optional().describe("Project color (hex code)"),
+  state: z.string().optional().describe("Initial project state ID")
+});
+
+const UpdateProjectArgsSchema = z.object({
+  id: z.string().describe("Project ID to update"),
+  name: z.string().optional().describe("New project name"),
+  description: z.string().optional().describe("New project description in markdown format"),
+  icon: z.string().optional().describe("New project icon (emoji)"),
+  color: z.string().optional().describe("New project color (hex code)"),
+  state: z.string().optional().describe("New project state ID")
+});
+
+const ListProjectsArgsSchema = z.object({
+  teamId: z.string().optional().describe("Filter projects by team ID"),
+  includeArchived: z.boolean().optional().describe("Include archived projects"),
+  limit: z.number().optional().describe("Maximum number of projects to return")
+});
+
+const ProjectContentArgsSchema = z.object({
+  id: z.string().describe("Project ID"),
+  content: z.string().describe("Rich markdown content for the project description")
+});
+
 async function main() {
   try {
     dotenv.config();
@@ -841,70 +1132,91 @@ async function main() {
       const uri = new URL(request.params.uri);
       const path = uri.pathname.replace(/^\//, '');
 
-      if (uri.protocol === 'linear-organization') {
-        const organization = await linearClient.getOrganization();
+      try {
+        if (uri.protocol === 'linear-organization:') {
+          const organization = await linearClient.getOrganization();
+          return {
+            contents: [{
+              uri: "linear-organization:",
+              mimeType: "application/json",
+              text: JSON.stringify(organization, null, 2)
+            }]
+          };
+        }
+
+        if (uri.protocol === 'linear-viewer:') {
+          const viewer = await linearClient.getViewer();
+          return {
+            contents: [{
+              uri: "linear-viewer:",
+              mimeType: "application/json",
+              text: JSON.stringify(viewer, null, 2)
+            }]
+          };
+        }
+
+        if (uri.protocol === 'linear-issue:') {
+          const issue = await linearClient.getIssue(path);
+          return {
+            contents: [{
+              uri: request.params.uri,
+              mimeType: "application/json",
+              text: JSON.stringify(issue, null, 2)
+            }]
+          };
+        }
+
+        if (uri.protocol === 'linear-project:') {
+          const project = await linearClient.getProject(path);
+          return {
+            contents: [{
+              uri: request.params.uri,
+              mimeType: "application/json",
+              text: JSON.stringify(project, null, 2)
+            }]
+          };
+        }
+
+        if (uri.protocol === 'linear-team:') {
+          const [teamId] = path.split('/');
+          const issues = await linearClient.getTeamIssues(teamId);
+          return {
+            contents: [{
+              uri: request.params.uri,
+              mimeType: "application/json",
+              text: JSON.stringify(issues, null, 2)
+            }]
+          };
+        }
+
+        if (uri.protocol === 'linear-user:') {
+          const [userId] = path.split('/');
+          const issues = await linearClient.getUserIssues({
+            userId
+          });
+          return {
+            contents: [{
+              uri: request.params.uri,
+              mimeType: "application/json",
+              text: JSON.stringify(issues, null, 2)
+            }]
+          };
+        }
+
+        throw new Error(`Unsupported resource URI: ${request.params.uri}`);
+      } catch (error) {
+        console.error("Error reading resource:", error);
         return {
-          contents: [{
-            uri: "linear-organization:",
-            mimeType: "application/json",
-            text: JSON.stringify(organization, null, 2)
-          }]
+          error: {
+            type: 'UNKNOWN_ERROR',
+            message: error instanceof Error ? error.message : String(error)
+          }
         };
       }
-
-      if (uri.protocol === 'linear-viewer') {
-        const viewer = await linearClient.getViewer();
-        return {
-          contents: [{
-            uri: "linear-viewer:",
-            mimeType: "application/json",
-            text: JSON.stringify(viewer, null, 2)
-          }]
-        };
-      }
-
-      if (uri.protocol === 'linear-issue:') {
-        const issue = await linearClient.getIssue(path);
-        return {
-          contents: [{
-            uri: request.params.uri,
-            mimeType: "application/json",
-            text: JSON.stringify(issue, null, 2)
-          }]
-        };
-      }
-
-      if (uri.protocol === 'linear-team:') {
-        const [teamId] = path.split('/');
-        const issues = await linearClient.getTeamIssues(teamId);
-        return {
-          contents: [{
-            uri: request.params.uri,
-            mimeType: "application/json",
-            text: JSON.stringify(issues, null, 2)
-          }]
-        };
-      }
-
-      if (uri.protocol === 'linear-user:') {
-        const [userId] = path.split('/');
-        const issues = await linearClient.getUserIssues({
-          userId: userId === 'me' ? undefined : userId
-        });
-        return {
-          contents: [{
-            uri: request.params.uri,
-            mimeType: "application/json",
-            text: JSON.stringify(issues, null, 2)
-          }]
-        };
-      }
-
-      throw new Error(`Unsupported resource URI: ${request.params.uri}`);
     });
 
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: [createIssueTool, updateIssueTool, searchIssuesTool, getUserIssuesTool, addCommentTool]
+      tools: [createIssueTool, updateIssueTool, searchIssuesTool, getUserIssuesTool, addCommentTool, createProjectTool, updateProjectTool, listProjectsTool, setProjectContentTool]
     }));
 
     server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => {
@@ -983,11 +1295,10 @@ async function main() {
             return {
               content: [{
                 type: "text",
-                text: `Found ${issues.length} issues:\n${
-                  issues.map((issue: LinearIssueResponse) =>
-                    `- ${issue.identifier}: ${issue.title}\n  Priority: ${issue.priority || 'None'}\n  Status: ${issue.status || 'None'}\n  ${issue.url}`
-                  ).join('\n')
-                }`,
+                text: `Found ${issues.length} issues:\n${issues.map((issue: LinearIssueResponse) =>
+                  `- ${issue.identifier}: ${issue.title}\n  Priority: ${issue.priority || 'None'}\n  Status: ${issue.status || 'None'}\n  ${issue.url}`
+                ).join('\n')
+                  }`,
                 metadata: baseResponse
               }]
             };
@@ -1000,11 +1311,10 @@ async function main() {
             return {
               content: [{
                 type: "text",
-                text: `Found ${issues.length} issues:\n${
-                  issues.map((issue: LinearIssueResponse) =>
-                    `- ${issue.identifier}: ${issue.title}\n  Priority: ${issue.priority || 'None'}\n  Status: ${issue.stateName}\n  ${issue.url}`
-                  ).join('\n')
-                }`,
+                text: `Found ${issues.length} issues:\n${issues.map((issue: LinearIssueResponse) =>
+                  `- ${issue.identifier}: ${issue.title}\n  Priority: ${issue.priority || 'None'}\n  Status: ${issue.status || 'None'}\n  ${issue.url}`
+                ).join('\n')
+                  }`,
                 metadata: baseResponse
               }]
             };
@@ -1018,6 +1328,57 @@ async function main() {
               content: [{
                 type: "text",
                 text: `Added comment to issue ${issue?.identifier}\nURL: ${comment.url}`,
+                metadata: baseResponse
+              }]
+            };
+          }
+
+          case "linear_create_project": {
+            const validatedArgs = CreateProjectArgsSchema.parse(args);
+            const project = await linearClient.createProject(validatedArgs);
+            return {
+              content: [{
+                type: "text",
+                text: `Created project ${project.name}\nURL: ${project.url}`,
+                metadata: baseResponse
+              }]
+            };
+          }
+
+          case "linear_update_project": {
+            const validatedArgs = UpdateProjectArgsSchema.parse(args);
+            const project = await linearClient.updateProject(validatedArgs);
+            return {
+              content: [{
+                type: "text",
+                text: `Updated project ${project.name}\nURL: ${project.url}`,
+                metadata: baseResponse
+              }]
+            };
+          }
+
+          case "linear_list_projects": {
+            const validatedArgs = ListProjectsArgsSchema.parse(args);
+            const projects = await linearClient.getProjects(validatedArgs);
+            return {
+              content: [{
+                type: "text",
+                text: `Found ${projects.length} projects:\n${projects.map((project: LinearProjectResponse) =>
+                  `- ${project.name}\n  Description: ${project.description || 'No description'}\n  ${project.url}`
+                ).join('\n')
+                  }`,
+                metadata: baseResponse
+              }]
+            };
+          }
+
+          case "linear_set_project_content": {
+            const validatedArgs = ProjectContentArgsSchema.parse(args);
+            const project = await linearClient.setProjectContent(validatedArgs);
+            return {
+              content: [{
+                type: "text",
+                text: `Updated project ${project.name}\nURL: ${project.url}`,
                 metadata: baseResponse
               }]
             };
@@ -1045,7 +1406,7 @@ async function main() {
             message: err.message,
             code: 'VALIDATION_ERROR'
           }));
-          
+
           return {
             content: [{
               type: "text",
